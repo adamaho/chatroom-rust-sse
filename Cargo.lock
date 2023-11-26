@@ -140,6 +140,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hyper 1.0.1",
+ "pin-project-lite",
  "tokio",
  "tokio-stream",
  "tower",

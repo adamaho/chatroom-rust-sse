@@ -11,6 +11,7 @@ axum = "0.6.20"
 futures = "0.3.29"
 futures-util = "0.3.29"
 hyper = { version = "1.0.1", features = ["full"] }
+pin-project-lite = "0.2.13"
 tokio = { version = "1.34.0", features = ["full"] }
 tokio-stream = { version = "0.1.14", features = ["full"] }
 tower = "0.4.13"

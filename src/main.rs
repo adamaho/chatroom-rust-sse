@@ -4,10 +4,10 @@ use std::convert::Infallible;
 
 use axum::{
     response::sse::{Event, KeepAlive, Sse},
-    response::Html,
     routing::get,
     Router,
 };
+use futures_util::future;
 use futures_util::stream::Stream;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_stream::wrappers::ReceiverStream;
@@ -26,41 +26,41 @@ struct Chatroom {
 }
 
 impl Chatroom {
-    pub fn add_client(&mut self, sender: Sender<Client>) -> Result<()> {
+    pub fn add_client(&mut self, sender: Sender<Client>) {
         self.counter += 1;
         self.clients
             .insert(format!("client_{:?}", self.counter), sender);
-        return Ok(());
     }
 
     pub async fn send_message(&mut self, message: String) -> Result<()> {
-        let mut clients_to_remove = Vec::new();
+        let mut message_futures = Vec::new();
 
-        for (id, client) in self.clients.iter() {
+        for client in self.clients.values() {
             if client.is_closed() {
-                clients_to_remove.push(id.clone());
-            } else {
-                let _ = client
-                    .send(Ok(Event::default()
-                        .event("USER_MESSAGE")
-                        .data(message.clone())))
-                    .await;
+                continue;
             }
+
+            message_futures.push(client.send(Ok(
+                Event::default().event("USER_MESSAGE").data(message.clone()),
+            )))
         }
 
-        if clients_to_remove.len() > 0 {
-            for id in clients_to_remove.iter() {
-                let _ = self.remove_client(id);
-                println!("[INFO]: Client {id} disconnected");
-            }
-        }
-
-        return Ok(());
+        future::join_all(message_futures).await;
+        self.remove_stale_clients();
+        Ok(())
     }
 
-    pub fn remove_client(&mut self, id: &String) -> Result<()> {
-        self.clients.remove(id);
-        Ok(())
+    pub fn remove_stale_clients(&mut self) {
+        let clients = self.clients.clone();
+        let stale_clients = clients
+            .iter()
+            .filter(|(_, client)| client.is_closed())
+            .map(|(id, _)| id)
+            .collect::<Vec<&String>>();
+
+        for id in stale_clients {
+            self.clients.remove(id);
+        }
     }
 }
 
@@ -71,10 +71,12 @@ async fn chatroom(mut events: Receiver<ChatroomEvent>) -> Result<()> {
         match events.recv().await {
             Some(event) => match event {
                 ChatroomEvent::ClientConnected(sender) => {
-                    let _ = chatroom.add_client(sender);
+                    chatroom.add_client(sender);
+                    println!("[INFO]: client added");
                 }
                 ChatroomEvent::SendMessage(message) => {
-                    let _ = chatroom.send_message(message).await;
+                    chatroom.send_message(message).await.unwrap();
+                    println!("[INFO]: message sent");
                 }
             },
             None => {
@@ -91,11 +93,10 @@ async fn main() {
     let (chatroom_sender, chatroom_receiver) = mpsc::channel(10);
 
     tokio::spawn(async {
-        let _ = chatroom(chatroom_receiver).await;
+        chatroom(chatroom_receiver).await.unwrap();
     });
 
     let app = Router::new()
-        .route("/", get(handler))
         .route(
             "/stream",
             get({
@@ -103,7 +104,13 @@ async fn main() {
                 move || stream(sender)
             }),
         )
-        .route("/send", get(move || send(chatroom_sender.clone())));
+        .route(
+            "/send",
+            get({
+                let sender = chatroom_sender.clone();
+                move || send(sender)
+            }),
+        );
 
     println!("Listening at http://localhost:3000");
     axum::Server::bind(&"127.0.0.1:3000".parse().unwrap())
@@ -112,33 +119,22 @@ async fn main() {
         .unwrap();
 }
 
-async fn handler() -> Html<&'static str> {
-    Html("<h1>Hello, World!</h1>")
-}
-
 async fn stream(chatroom_sender: Sender<ChatroomEvent>) -> Sse<impl Stream<Item = Client>> {
     let (sender, receiver) = mpsc::channel::<Client>(10);
 
-    match chatroom_sender
+    chatroom_sender
         .send(ChatroomEvent::ClientConnected(sender))
         .await
-    {
-        Ok(_) => {
-            println!("[INFO]: client connected");
-        }
-        Err(err) => {
-            eprintln!("[ERROR]: failed to connect client to chatroom, {:?}", err);
-        }
-    };
+        .unwrap();
 
     let rs_stream = ReceiverStream::new(receiver);
 
-    return Sse::new(rs_stream).keep_alive(KeepAlive::default());
+    return Sse::new(rs_stream);
 }
 
 async fn send(chatroom_sender: Sender<ChatroomEvent>) -> String {
-    let _ = chatroom_sender
+    chatroom_sender
         .send(ChatroomEvent::SendMessage("Hello world".to_string()))
-        .await;
+        .await.unwrap();
     return String::from("message sent.");
 }

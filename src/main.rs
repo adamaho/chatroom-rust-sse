@@ -48,12 +48,12 @@ async fn stream(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     sender: Sender<realtime::RealtimeEvent>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let id = addr.ip().to_string();
+    let id = addr.to_string();
     println!("{id}: address");
 
     let (stream, client) = realtime::RealtimeClient::with_stream(id, 10);
 
-    sender
+   sender 
         .send(realtime::RealtimeEvent::Connected((
             "simple".to_string(),
             client,
@@ -65,7 +65,7 @@ async fn stream(
 }
 
 async fn send(sender: Sender<realtime::RealtimeEvent>) -> String {
-    sender
+   sender 
         .send(realtime::RealtimeEvent::Emit((
             "simple".to_string(),
             "Hello world".to_string(),

@@ -3,90 +3,88 @@ use std::{collections::HashMap, convert::Infallible};
 use anyhow::Result;
 use axum::response::sse::Event;
 use futures_util::future;
-use tokio::{
-    sync::mpsc::{self, Sender},
-    time,
-};
+use tokio::sync::mpsc::{self, Sender};
+use tokio_stream::wrappers::ReceiverStream;
 
-pub type Client = Result<Event, Infallible>;
+#[derive(Debug, Clone)]
+pub struct RealtimeClient {
+    pub id: String,
+    pub tx: Sender<Result<Event, Infallible>>,
+}
 
-pub enum ChatroomEvent {
-    ClientConnected(Sender<Client>),
-    SendMessage(String),
-    Ping,
+impl RealtimeClient {
+    pub fn with_stream(
+        id: String,
+        buffer: usize,
+    ) -> (ReceiverStream<Result<Event, Infallible>>, Self) {
+        let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(buffer);
+        let stream = ReceiverStream::new(rx);
+        (stream, RealtimeClient { id, tx })
+    }
+}
+
+pub enum RealtimeEvent {
+    Connected((String, RealtimeClient)),
+    Emit((String, String)),
 }
 
 #[derive(Default)]
-struct Chatroom {
-    counter: usize,
-    clients: HashMap<String, Sender<Client>>,
+struct Realtime {
+    clients: HashMap<String, RealtimeClient>,
 }
 
-impl Chatroom {
+impl Realtime {
     /// Adds a new client to the chatroom
-    pub fn add_client(&mut self, sender: Sender<Client>) {
-        self.counter += 1;
+    pub fn add_client(&mut self, client: RealtimeClient) {
         self.clients
-            .insert(format!("client_{:?}", self.counter), sender);
+            .insert(client.id.clone(), client);
     }
 
     /// Sends a message to every client in the chatroom
-    pub async fn send_message(&self, message: String) -> Result<()> {
+    pub async fn send_message(&mut self, message: String) -> Result<()> {
         let mut message_futures = Vec::new();
-
-        for client in self.clients.values() {
-            if client.is_closed() {
-                continue;
-            }
-
-            message_futures
-                .push(client.send(Ok(Event::default().event("message").data(message.clone()))))
-        }
-
-        future::join_all(message_futures).await;
-        Ok(())
-    }
-
-    /// Removes any stale clients that have dropped their connection
-    /// to the server
-    pub async fn remove_stale_clients(&mut self) {
-        let mut active_clients = HashMap::new();
+        let mut stale_clients = Vec::new();
 
         for client in self.clients.iter() {
             let (id, client) = client;
-            if client
-                .send(Ok(Event::default().event("ping")))
-                .await
-                .is_ok()
-            {
-                active_clients.insert(id.clone(), client.clone());
-            } else {
-                println!("[INFO]: client {id} disconnected");
+            if client.tx.is_closed() {
+                let id = id;
+                stale_clients.push(id.clone());
+                continue;
             }
+
+            message_futures.push(
+                client
+                    .tx
+                    .send(Ok(Event::default().event("message").data(message.clone()))),
+            )
         }
 
-        self.clients = active_clients;
+        future::join_all(message_futures).await;
+
+        // remove stale clients
+        for id in stale_clients.iter() {
+            self.clients.remove(id);
+        }
+
+        Ok(())
     }
 }
 
-pub fn channel(buffer: usize) -> Result<Sender<ChatroomEvent>> {
+
+pub fn sender(buffer: usize) -> Result<Sender<RealtimeEvent>> {
     let (tx, mut events) = mpsc::channel(buffer);
 
     tokio::spawn(async move {
-        let mut chatroom = Chatroom::default();
+        let mut chatroom = Realtime::default();
         loop {
             match events.recv().await {
                 Some(event) => match event {
-                    ChatroomEvent::ClientConnected(sender) => {
+                    RealtimeEvent::Connected((_store_key, sender)) => {
                         chatroom.add_client(sender);
-                        println!("[INFO]: client added");
                     }
-                    ChatroomEvent::SendMessage(message) => {
+                    RealtimeEvent::Emit((_store_key, message)) => {
                         chatroom.send_message(message).await.unwrap();
-                        println!("[INFO]: message sent");
-                    }
-                    ChatroomEvent::Ping => {
-                        chatroom.remove_stale_clients().await;
                     }
                 },
                 None => {
@@ -94,14 +92,6 @@ pub fn channel(buffer: usize) -> Result<Sender<ChatroomEvent>> {
                     break;
                 }
             }
-        }
-    });
-
-    let pinger = tx.clone();
-    tokio::spawn(async move {
-        loop {
-            time::sleep(time::Duration::from_secs(10)).await;
-            pinger.send(ChatroomEvent::Ping).await.unwrap();
         }
     });
 

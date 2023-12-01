@@ -1,5 +1,5 @@
 [package]
-name = "chatroom-rust"
+name = "rust-sse-message-bus"
 version = "0.1.0"
 edition = "2021"
 

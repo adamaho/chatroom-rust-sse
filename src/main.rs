@@ -1,35 +1,37 @@
-pub mod realtime;
+mod realtime;
 
-use std::{convert::Infallible, net::SocketAddr};
+use std::net::SocketAddr;
 
 use axum::{
     extract::connect_info::ConnectInfo,
-    response::sse::{Event, Sse},
+    response::sse::{self, Sse},
     routing::get,
     Router,
 };
 use futures_util::stream::Stream;
+use serde::Serialize;
 use tokio::sync::mpsc::Sender;
+
+use crate::realtime::{Client, Message};
 
 #[tokio::main]
 async fn main() {
-    let broadcast = realtime::sender(10).unwrap();
+    let broadcast = realtime::sender(100).unwrap();
 
-    let app = Router::new()
-        .route(
-            "/stream",
-            get({
-                let sender = broadcast.clone();
-                move |req| stream(req, sender)
-            }),
-        )
-        .route(
-            "/send",
-            get({
-                let sender = broadcast.clone();
-                move || send(sender)
-            }),
-        );
+    let app = Router::new().route(
+        "/stream",
+        get({
+            let sender = broadcast.clone();
+            move |req| stream(req, sender)
+        }),
+    )
+    .route(
+        "/send",
+        get({
+            let sender = broadcast.clone();
+            move || send(sender)
+        }),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -44,32 +46,36 @@ async fn main() {
     .unwrap();
 }
 
+#[derive(Serialize, Clone)]
+struct Foo {
+    pub bar: String,
+}
+
 async fn stream(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    sender: Sender<realtime::RealtimeEvent>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    sender: Sender<Message<Foo>>,
+) -> Sse<impl Stream<Item = Result<sse::Event, axum::Error>>> {
     let id = addr.to_string();
-    println!("{id}: address");
-
-    let (stream, client) = realtime::RealtimeClient::with_stream(id, 10);
-
-   sender 
-        .send(realtime::RealtimeEvent::Connected((
-            "simple".to_string(),
-            client,
-        )))
+    let (stream, client) = Client::with_stream(id, 10);
+    sender
+        .send(realtime::Message::Connected(("simple".to_string(), client)))
         .await
         .unwrap();
 
     return Sse::new(stream);
 }
 
-async fn send(sender: Sender<realtime::RealtimeEvent>) -> String {
-   sender 
-        .send(realtime::RealtimeEvent::Emit((
-            "simple".to_string(),
-            "Hello world".to_string(),
-        )))
+async fn send(sender: Sender<Message<Foo>>) -> String {
+    let mut bar = Vec::new();
+
+    for i in 0..10 {
+        bar.push(Foo {
+        bar: "baz".to_string(),
+    })
+    }
+    let all_event = realtime::AllEvent { data: bar };
+    sender
+        .send(Message::AllEvent(("simple".to_string(), all_event)))
         .await
         .unwrap();
     return String::from("message sent.");

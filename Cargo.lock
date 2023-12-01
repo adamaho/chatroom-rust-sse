@@ -145,6 +145,8 @@ dependencies = [
  "futures-util",
  "hyper",
  "pin-project-lite",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tower",
